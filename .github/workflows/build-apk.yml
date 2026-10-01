@@ -268,19 +268,44 @@ jobs:
             {
               echo ""
               echo "### ❌ assembleRelease 失败（退出码 ${status}）"
-              echo "> 首次 CI 运行时该步骤失败，但日志需鉴权下载；以下为本地可读的关键片段。"
+              echo "> 首次 CI 运行时该步骤失败，但 job 日志需鉴权下载；以下为关键片段。"
               echo '```text'
               grep -nE '^e: |FAILURE|What went wrong|Caused by|error:|Execution failed|No space left|Could not|OutOfMemory' gradle-build.log | head -n 60 || true
               echo "----------------------------------------"
               tail -n 80 gradle-build.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::assembleRelease 失败（退出码 ${status}）；详情见本步骤 Step Summary 与上方日志"
+            # 日志在 job 结束后会被清理，无法作为 artifact 上传；
+            # 这里把关键片段写入可控文件，供后续步骤在任何情况下上传。
+            {
+              echo "=== assembleRelease 失败，退出码 ${status} ==="
+              echo "=== 环境 ==="
+              echo "JAVA_HOME=$JAVA_HOME"
+              java -version 2>&1 | head -n 2
+              echo "ANDROID_HOME=$ANDROID_HOME"
+              df -h / /home 2>/dev/null || df -h /
+              free -h || true
+              echo "=== Gradle 关键行 ==="
+              grep -nE '^e: |FAILURE|What went wrong|Caused by|error:|Execution failed|No space left|Could not|OutOfMemory' gradle-build.log | head -n 80 || true
+              echo "=== 日志末尾 200 行 ==="
+              tail -n 200 gradle-build.log
+            } > build-failure.txt 2>&1 || true
+            echo "::error::assembleRelease 失败（退出码 ${status}）；详情见本步骤 Step Summary 与 build-failure.txt 产物"
             exit "$status"
           fi
 
           echo "构建产物目录内容："
           ls -l "$APK_DIR"
+
+      # 仅在构建失败时上传诊断文件（公开 artifact，便于无 Token 时排查）
+      - name: 上传构建失败诊断（仅失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-diagnostics
+          path: build-failure.txt
+          if-no-files-found: warn
+          retention-days: 7
 
       # ---------------------------------------------------------------- 校验签名
       - name: 校验 APK 签名（apksigner verify --verbose）
