@@ -240,13 +240,45 @@ jobs:
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
         run: |
-          set -euo pipefail
+          set -o pipefail
           if [ "${{ steps.keystore.outputs.signed }}" = "true" ]; then
             echo "使用 Secrets 中的正式签名密钥构建"
           else
             echo "未配置签名 Secrets：按 app/build.gradle.kts 的回退规则使用 debug 签名"
           fi
-          ./gradlew assembleRelease --stacktrace
+
+          # 诊断信息（CI 日志需鉴权才能下载，这里直接写进 Step Summary）
+          {
+            echo "### 构建环境"
+            echo '```'
+            echo "JAVA_HOME=$JAVA_HOME"
+            java -version 2>&1 | head -n 2
+            echo "ANDROID_HOME=$ANDROID_HOME"
+            echo "--- 磁盘 ---"; df -h / /home 2>/dev/null || df -h /
+            echo "--- 内存 ---"; free -h || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          set +e
+          ./gradlew assembleRelease --stacktrace --console=plain 2>&1 | tee gradle-build.log
+          status=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$status" -ne 0 ]; then
+            {
+              echo ""
+              echo "### ❌ assembleRelease 失败（退出码 ${status}）"
+              echo "> 首次 CI 运行时该步骤失败，但日志需鉴权下载；以下为本地可读的关键片段。"
+              echo '```text'
+              grep -nE '^e: |FAILURE|What went wrong|Caused by|error:|Execution failed|No space left|Could not|OutOfMemory' gradle-build.log | head -n 60 || true
+              echo "----------------------------------------"
+              tail -n 80 gradle-build.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::assembleRelease 失败（退出码 ${status}）；详情见本步骤 Step Summary 与上方日志"
+            exit "$status"
+          fi
+
           echo "构建产物目录内容："
           ls -l "$APK_DIR"
 
