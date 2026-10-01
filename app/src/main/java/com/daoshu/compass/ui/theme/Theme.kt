@@ -85,28 +85,31 @@ private val LightColors = lightColorScheme(
 
 /** 罗盘盘面专用色板，供 Canvas 绘制层使用（与 Material 主题解耦） */
 data class DialColors(
-    val ringOuter: Color,
-    val ringInner: Color,
     val tickMajor: Color,
     val tickMinor: Color,
-    val textPrimary: Color,
-    val textSecondary: Color,
     val needleNorth: Color,
     val needleSouth: Color,
     val centerHub: Color,
     val trueNorthLine: Color,
     val magneticNorthLine: Color,
-    val background: Brush
+    val background: Brush,
+    // ---------------- 环带底色与环上文字 ----------------
+    // 每个环带使用**不透明实色**，并为环上文字配一个对比明确的前景色：
+    // 此前的做法是用 alpha 把 ringOuter 淡涂在米色盘面上，得到的金绿色与深金文字
+    // 明度接近（真机截图实测正上方 r=272..316 处文字色 (112,95,49) 与底色 (163,142,99)
+    // 几乎同级），导致「文字看不清」。这里改为显式配对的实色 + 高对比文字色。
+    /** 环带底色（实色，不依赖 alpha 叠加） */
+    val bandColor: Color,
+    /** 环带上的文字颜色（与 [bandColor] 保证足够对比） */
+    val bandTextColor: Color,
+    /** 主刻度/外环/分格线等装饰线颜色（画在盘面底色上，需与 background 对比） */
+    val onDialColor: Color
 )
 
-/** 深色盘面（夜间观星） */
+/** 深色盘面（夜间观星）：深墨金环带 + 米金文字，对比充足 */
 val DarkDialColors = DialColors(
-    ringOuter = CompassGold,
-    ringInner = Color(0xFF8A7748),
     tickMajor = CompassGold,
     tickMinor = Color(0xFF6E6350),
-    textPrimary = Color(0xFFF0E6CE),
-    textSecondary = Color(0xFFC3BBA8),
     needleNorth = BrightGold,
     needleSouth = Color(0xFF6B5B33),
     centerHub = Color(0xFFF2E3BC),
@@ -116,17 +119,16 @@ val DarkDialColors = DialColors(
         colors = listOf(Color(0xFF1B212B), Ink),
         center = Offset.Unspecified,
         radius = Float.POSITIVE_INFINITY
-    )
+    ),
+    bandColor = Color(0xFF2A2416),
+    bandTextColor = Color(0xFFF5E6C0),
+    onDialColor = CompassGold
 )
 
-/** 浅色盘面（白天户外） */
+/** 浅色盘面（白天户外）：暖金实色环带 + 近黑褐文字，户外强光下依然清晰 */
 val LightDialColors = DialColors(
-    ringOuter = Color(0xFF8A6D2F),
-    ringInner = Color(0xFFA8905C),
     tickMajor = Color(0xFF6B5626),
     tickMinor = Color(0xFF9A8C70),
-    textPrimary = Color(0xFF2A2415),
-    textSecondary = Color(0xFF5A5140),
     needleNorth = Cinnabar,
     needleSouth = Color(0xFF4A4232),
     centerHub = Color(0xFF2A2415),
@@ -136,7 +138,10 @@ val LightDialColors = DialColors(
         colors = listOf(Color(0xFFFFFDF7), Paper),
         center = Offset.Unspecified,
         radius = Float.POSITIVE_INFINITY
-    )
+    ),
+    bandColor = Color(0xFFD8C79C),
+    bandTextColor = Color(0xFF3A2E12),
+    onDialColor = Color(0xFF8A6D2F)
 )
 
 /** 当前盘面色板（@Composable 内使用） */
