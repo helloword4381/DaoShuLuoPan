@@ -1,0 +1,2 @@
+# 该文件仅用于保留 keystore/ 目录结构。
+# 本目录禁止提交任何密钥材料（*.jks / *.keystore / key.properties 等），详见 README.md。

@@ -1,0 +1,155 @@
+# =============================================================================
+# 《道枢罗盘》版本一致性检查工作流
+# -----------------------------------------------------------------------------
+# 目的：防止 release/version.json（客户端自动更新的事实来源）与
+#       app/build.gradle.kts（构建事实来源）版本号漂移。
+# 校验内容：
+#   1) version.json 是合法 JSON，且字段恰好为 CONTRACT 第 6 节的 6 个字段；
+#   2) versionName / versionCode 与 app/build.gradle.kts 完全一致；
+#   3) forceUpdate 为布尔、minSupportedVersion 为整数；
+#   4) downloadUrl 符合 GitHub Release 资产命名约定（ASCII 名）。
+# 触发：针对相关文件的 pull_request、手动 workflow_dispatch。
+# =============================================================================
+name: 版本一致性检查
+
+on:
+  pull_request:
+    paths:
+      - 'app/build.gradle.kts'
+      - 'release/version.json'
+      - '.github/workflows/version-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-version:
+    name: version.json 与 build.gradle.kts 一致性
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 校验版本字段一致性
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import re
+          import sys
+
+          repo = pathlib.Path(".")
+          gradle_path = repo / "app" / "build.gradle.kts"
+          json_path = repo / "release" / "version.json"
+
+          for path in (gradle_path, json_path):
+              if not path.is_file():
+                  sys.exit(f"错误：缺少文件 {path}")
+
+          gradle = gradle_path.read_text(encoding="utf-8")
+
+          def from_gradle(const_name: str, fallback: str):
+              """解析 app/build.gradle.kts 中的版本声明：按序短路，先常量、后字面量。
+
+              本工程的版本是【引用常量】而非字面量，必须优先锚定 val 常量：
+                  val appVersionName = "1.0.0"        <- 常量定义（第 13-14 行）
+                  versionName       = appVersionName  <- defaultConfig 内是常量引用
+              若只用 versionName/versionCode 的字面量正则，必然解析失败。
+              常量模式同时兼容 const val 与类型标注写法：(const )?val <name>(: String|Int)? = ...
+              所有模式均行首锚定，且要求标识符后紧跟 [ \t]*=，
+              因此不会误命中 versionNameSuffix = "-debug" 这类行。
+              """
+              patterns = [
+                  rf'^[ \t]*(?:const[ \t]+)?val[ \t]+{const_name}(?:[ \t]*:[ \t]*String)?[ \t]*=[ \t]*"([^"]*)"',
+                  rf'^[ \t]*(?:const[ \t]+)?val[ \t]+{const_name}[ \t]*=[ \t]*"([^"]*)"',
+                  rf'^[ \t]*(?:const[ \t]+)?val[ \t]+{const_name}(?:[ \t]*:[ \t]*Int)?[ \t]*=[ \t]*([0-9]+)',
+                  rf'^[ \t]*(?:const[ \t]+)?val[ \t]+{const_name}[ \t]*=[ \t]*([0-9]+)',
+              ]
+              if fallback:
+                  patterns.append(fallback)
+              for pattern in patterns:
+                  match = re.search(pattern, gradle, re.MULTILINE)
+                  if match:
+                      return match.group(1)
+              return None
+
+          # 第一优先级：锚定 val 常量（本工程实际写法）；第二优先级：defaultConfig 内的字面量赋值
+          g_version_name = (
+              from_gradle("appVersionName", r'^[ \t]*val[ \t]+appVersionName[ \t]*=[ \t]*"([^"]*)"')
+              or from_gradle("appVersionName", r'^[ \t]*versionName[ \t]*=[ \t]*"([^"]*)"')
+          )
+          g_version_code = (
+              from_gradle("appVersionCode", r'^[ \t]*val[ \t]+appVersionCode[ \t]*=[ \t]*([0-9]+)')
+              or from_gradle("appVersionCode", r'^[ \t]*versionCode[ \t]*=[ \t]*([0-9]+)')
+          )
+          if not g_version_name or not g_version_code:
+              sys.exit("错误：无法从 app/build.gradle.kts 解析 versionName/versionCode")
+
+          owner = re.search(r'^[ \t]*(?:const[ \t]+)?val[ \t]+githubOwner[ \t]*=[ \t]*"([^"]*)"', gradle, re.MULTILINE)
+          repo_name = re.search(r'^[ \t]*(?:const[ \t]+)?val[ \t]+githubRepo[ \t]*=[ \t]*"([^"]*)"', gradle, re.MULTILINE)
+          if not owner or not repo_name:
+              sys.exit("错误：无法从 app/build.gradle.kts 解析 githubOwner/githubRepo")
+
+          try:
+              data = json.loads(json_path.read_text(encoding="utf-8"))
+          except json.JSONDecodeError as exc:
+              sys.exit(f"错误：release/version.json 不是合法 JSON：{exc}")
+
+          expected_keys = {
+              "versionCode",
+              "versionName",
+              "downloadUrl",
+              "changelog",
+              "forceUpdate",
+              "minSupportedVersion",
+          }
+          actual_keys = set(data.keys())
+          if actual_keys != expected_keys:
+              sys.exit(
+                  "错误：version.json 字段不符合 CONTRACT 第 6 节。\n"
+                  f"  缺少：{sorted(expected_keys - actual_keys)}\n"
+                  f"  多余：{sorted(actual_keys - expected_keys)}"
+              )
+
+          errors = []
+          if data["versionName"] != g_version_name:
+              errors.append(
+                  f"versionName 不一致：version.json={data['versionName']} build.gradle.kts={g_version_name}"
+              )
+          if str(data["versionCode"]) != str(g_version_code):
+              errors.append(
+                  f"versionCode 不一致：version.json={data['versionCode']} build.gradle.kts={g_version_code}"
+              )
+          if not isinstance(data["forceUpdate"], bool):
+              errors.append("forceUpdate 必须为布尔值")
+          if not isinstance(data["minSupportedVersion"], int) or isinstance(data["minSupportedVersion"], bool):
+              errors.append("minSupportedVersion 必须为整数")
+          if not isinstance(data["changelog"], str):
+              errors.append("changelog 必须为字符串")
+
+          expected_url = (
+              f"https://github.com/{owner.group(1)}/{repo_name.group(1)}/releases/download/"
+              f"v{g_version_name}/daoshu-compass-v{g_version_name}.apk"
+          )
+          if data["downloadUrl"] != expected_url:
+              errors.append(
+                  "downloadUrl 与仓库/版本不匹配：\n"
+                  f"  实际：{data['downloadUrl']}\n"
+                  f"  期望：{expected_url}"
+              )
+
+          if errors:
+              print("版本一致性检查未通过：", file=sys.stderr)
+              for item in errors:
+                  print(f"  - {item}", file=sys.stderr)
+              sys.exit(1)
+
+          print("版本一致性检查通过")
+          print(f"  versionName = {g_version_name}")
+          print(f"  versionCode = {g_version_code}")
+          print(f"  downloadUrl = {data['downloadUrl']}")
+          PY

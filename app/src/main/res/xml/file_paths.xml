@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 供 FileProvider（authority = ${applicationId}.fileprovider）使用的路径白名单 -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- APK 下载目录：context.cacheDir/apk -->
+    <cache-path
+        name="apk_cache"
+        path="apk/" />
+    <cache-path
+        name="cache_root"
+        path="." />
+    <external-cache-path
+        name="external_apk_cache"
+        path="apk/" />
+    <files-path
+        name="apk_files"
+        path="apk/" />
+</paths>

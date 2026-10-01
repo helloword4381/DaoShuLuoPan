@@ -1,0 +1,402 @@
+# =============================================================================
+# 《道枢罗盘》发布构建工作流
+# -----------------------------------------------------------------------------
+# 触发：
+#   1) push 到 main（仅限 app/**、构建脚本、gradle 版本目录、本工作流本身变更）
+#   2) workflow_dispatch（可选手动覆盖 versionName / versionCode）
+#   3) push 标签 v*（注意：GitHub 不针对标签推送评估 paths 过滤）
+# 产物：已签名 release APK（中文名 + ASCII 名）与 SHA256SUMS；标签触发时创建 GitHub Release。
+# 安全：签名材料全部来自 GitHub Secrets，通过 env 注入，日志中绝不打印口令或 base64 内容。
+# 与工程的一致性（禁止修改 app/build.gradle.kts）：
+#   * 任务：./gradlew assembleRelease -> app/build/outputs/apk/release/app-release.apk
+#   * 签名环境变量：KEYSTORE_PATH / ANDROID_KEY_ALIAS / ANDROID_KEY_PASSWORD / ANDROID_STORE_PASSWORD
+#   * 版本：app/build.gradle.kts 中的 appVersionCode / appVersionName
+#   * 更新通道：release/version.json + 仓库 helloword4381/DaoShuLuoPan 的 main 分支
+# =============================================================================
+name: 构建发布 APK
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+    paths:
+      - 'app/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle/**'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+    inputs:
+      versionName:
+        description: '可选：覆盖 versionName（留空则读取 app/build.gradle.kts 的 appVersionName）'
+        required: false
+        type: string
+        default: ''
+      versionCode:
+        description: '可选：覆盖 versionCode（留空则读取 app/build.gradle.kts 的 appVersionCode）'
+        required: false
+        type: string
+        default: ''
+
+# 回推 release/version.json 与创建 Release 需要写权限
+permissions:
+  contents: write
+
+# 同一 git ref 串行构建，避免两个运行同时回推 version.json
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GRADLE_VERSION: '8.11.1'
+  COMPILE_SDK: '35'
+  BUILD_TOOLS_VERSION: '35.0.0'
+  APK_DIR: app/build/outputs/apk/release
+  DIST_DIR: dist
+
+jobs:
+  build:
+    name: 构建 / 签名 / 发布
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # ---------------------------------------------------------------- 检出
+      - name: 检出代码（完整历史与标签，供 rebase 回推使用）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ---------------------------------------------------------------- JDK
+      # 不使用 setup-java 的 cache，Gradle 缓存统一交给 setup-gradle + actions/cache
+      - name: 安装 JDK 17（Temurin）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ------------------------------------------------------------ Android SDK
+      - name: 安装 Android SDK（platforms;android-35 + build-tools;35.0.0）
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0 platform-tools'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+
+      - name: 校验 SDK 组件就绪（缺失则用 sdkmanager 补装）
+        run: |
+          set -euo pipefail
+          if [ ! -d "$ANDROID_HOME/platforms/android-35" ] || [ ! -d "$ANDROID_HOME/build-tools/35.0.0" ]; then
+            echo "SDK 组件缺失，使用 sdkmanager 补装"
+            yes | sdkmanager --licenses >/dev/null 2>&1 || true
+            sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+          fi
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -1 "$ANDROID_HOME/platforms"
+          ls -1 "$ANDROID_HOME/build-tools"
+
+      # ------------------------------------------------------------ Gradle 缓存
+      - name: 配置 Gradle（主缓存方案：gradle/actions/setup-gradle）
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          cache-read-only: false
+
+      # 备选缓存：即使 setup-gradle 未命中，也能复用 ~/.gradle 下的依赖与 wrapper 发行包
+      - name: 缓存 Gradle 目录（备选方案：actions/cache）
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', 'gradle/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # Gradle Wrapper：仓库当前未提交 gradlew，这里用 setup-gradle 安装的 Gradle 生成，
+      # 只作用于本次 CI 的临时检出目录，不会回写仓库。
+      - name: 确保 Gradle Wrapper 可用
+        run: |
+          set -euo pipefail
+          if [ ! -f ./gradlew ]; then
+            echo "::notice::未检测到 gradlew，使用 Gradle ${GRADLE_VERSION} 生成 wrapper（仅本次 CI 临时目录）"
+            gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
+          fi
+          chmod +x ./gradlew
+          ./gradlew --version
+
+      # ---------------------------------------------------------------- 版本号
+      - name: 解析版本号（支持 workflow_dispatch 手动覆盖）
+        id: version
+        env:
+          INPUT_VERSION_NAME: ${{ inputs.versionName }}
+          INPUT_VERSION_CODE: ${{ inputs.versionCode }}
+        run: |
+          set -euo pipefail
+
+          # 与 app/build.gradle.kts 定稿常量保持一致：val appVersionName / val appVersionCode
+          version_name="$(grep -E '^[[:space:]]*val[[:space:]]+appVersionName' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]*)".*/\1/')"
+          version_code="$(grep -E '^[[:space:]]*val[[:space:]]+appVersionCode' app/build.gradle.kts | head -n 1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/')"
+
+          # 回退：直接写在 defaultConfig 中的 versionName = "x" / versionCode = n
+          if [ -z "$version_name" ]; then
+            version_name="$(grep -E '^[[:space:]]*versionName[[:space:]]*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]*)".*/\1/')"
+          fi
+          if [ -z "$version_code" ]; then
+            version_code="$(grep -E '^[[:space:]]*versionCode[[:space:]]*=' app/build.gradle.kts | head -n 1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/')"
+          fi
+
+          # 手动触发覆盖：仅在本次 CI 临时检出内改写，绝不提交（version.json 回推时只 add release/version.json）
+          if [ -n "${INPUT_VERSION_NAME}" ]; then
+            echo "::notice::手动覆盖 versionName=${INPUT_VERSION_NAME}（仅 CI 临时文件）"
+            sed -i -E 's/^([[:space:]]*val[[:space:]]+appVersionName[[:space:]]*=[[:space:]]*)"[^"]*"/\1"'"${INPUT_VERSION_NAME}"'"/' app/build.gradle.kts
+            version_name="${INPUT_VERSION_NAME}"
+          fi
+          if [ -n "${INPUT_VERSION_CODE}" ]; then
+            echo "::notice::手动覆盖 versionCode=${INPUT_VERSION_CODE}（仅 CI 临时文件）"
+            sed -i -E 's/^([[:space:]]*val[[:space:]]+appVersionCode[[:space:]]*=[[:space:]]*)[0-9]+/\1'"${INPUT_VERSION_CODE}"'/' app/build.gradle.kts
+            version_code="${INPUT_VERSION_CODE}"
+          fi
+
+          if [ -z "$version_name" ] || [ -z "$version_code" ]; then
+            echo "::error::无法从 app/build.gradle.kts 解析 versionName/versionCode"
+            exit 1
+          fi
+          if ! printf '%s' "$version_code" | grep -qE '^[0-9]+$'; then
+            echo "::error::versionCode 必须为纯数字，当前为：$version_code"
+            exit 1
+          fi
+
+          # 更新通道所需的仓库信息同样从 build.gradle.kts 解析，避免两处硬编码不一致
+          github_owner="$(grep -E '^[[:space:]]*val[[:space:]]+githubOwner' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]*)".*/\1/')"
+          github_repo="$(grep -E '^[[:space:]]*val[[:space:]]+githubRepo' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]*)".*/\1/')"
+          github_branch="$(grep -E '^[[:space:]]*val[[:space:]]+githubBranch' app/build.gradle.kts | head -n 1 | sed -E 's/.*"([^"]*)".*/\1/')"
+          [ -n "$github_owner" ] || github_owner="helloword4381"
+          [ -n "$github_repo" ] || github_repo="DaoShuLuoPan"
+          [ -n "$github_branch" ] || github_branch="main"
+
+          {
+            echo "version_name=$version_name"
+            echo "version_code=$version_code"
+            echo "github_owner=$github_owner"
+            echo "github_repo=$github_repo"
+            echo "github_branch=$github_branch"
+          } >> "$GITHUB_OUTPUT"
+          echo "解析结果：versionName=$version_name versionCode=$version_code 仓库=$github_owner/$github_repo@$github_branch"
+
+      # ---------------------------------------------------------------- 签名密钥
+      - name: 解码签名密钥到 RUNNER_TEMP（日志不打印任何密钥内容）
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD ANDROID_STORE_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::缺少仓库 Secret：$name（Settings -> Secrets and variables -> Actions）"
+              exit 1
+            fi
+          done
+
+          keystore_path="$RUNNER_TEMP/release-key.jks"
+          umask 077
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          chmod 600 "$keystore_path"
+
+          if [ ! -s "$keystore_path" ]; then
+            echo "::error::keystore 解码失败或内容为空"
+            exit 1
+          fi
+          # 只输出文件类型与字节数，绝不输出文件内容
+          file "$keystore_path"
+          echo "keystore 字节数：$(wc -c < "$keystore_path" | tr -d ' ')"
+          echo "KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------- 构建
+      - name: 构建签名 Release APK（assembleRelease）
+        env:
+          KEYSTORE_PATH: ${{ runner.temp }}/release-key.jks
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          ./gradlew assembleRelease --stacktrace
+          echo "构建产物目录内容："
+          ls -l "$APK_DIR"
+
+      # ---------------------------------------------------------------- 校验签名
+      - name: 校验 APK 签名（apksigner verify --verbose）
+        run: |
+          set -euo pipefail
+          bash scripts/verify-apk.sh "$APK_DIR/app-release.apk"
+          rm -f "$KEYSTORE_PATH"
+
+      # ---------------------------------------------------------------- 交付物
+      - name: 生成交付物（中文名 + ASCII 名）与 SHA256 校验和
+        run: |
+          set -euo pipefail
+          version_name='${{ steps.version.outputs.version_name }}'
+          src="$APK_DIR/app-release.apk"
+          if [ ! -f "$src" ]; then
+            echo "::error::未找到 release 产物：$src"
+            ls -lR app/build/outputs/apk || true
+            exit 1
+          fi
+          mkdir -p "$DIST_DIR"
+          cp "$src" "$DIST_DIR/道枢罗盘-v${version_name}.apk"
+          cp "$src" "$DIST_DIR/daoshu-compass-v${version_name}.apk"
+          (cd "$DIST_DIR" && sha256sum ./*.apk > SHA256SUMS.txt)
+          cat "$DIST_DIR/SHA256SUMS.txt"
+          ls -l "$DIST_DIR"
+
+      - name: 上传构建产物（artifact）
+        uses: actions/upload-artifact@v4
+        with:
+          name: daoshu-compass-v${{ steps.version.outputs.version_name }}-release
+          path: |
+            dist/*.apk
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      # ------------------------------------------------- Release 说明 / version.json
+      - name: 生成 Release 说明与 release/version.json
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          GITHUB_OWNER_CFG: ${{ steps.version.outputs.github_owner }}
+          GITHUB_REPO_CFG: ${{ steps.version.outputs.github_repo }}
+        run: |
+          set -euo pipefail
+
+          changelog="道枢罗盘 v${VERSION_NAME}（versionCode ${VERSION_CODE}）：四层罗盘表盘（360°刻度/二十八宿/六十甲子/二十四山+八卦）、传感器融合与方位角平滑、GeomagneticField 磁偏角、DataStore 设置持久化、三级降级自动更新与 APK 安装。"
+
+          {
+            echo "## 道枢罗盘 v${VERSION_NAME}"
+            echo ""
+            echo "- versionCode: \`${VERSION_CODE}\`"
+            echo "- 构建提交: \`${GITHUB_SHA}\`"
+            echo "- 发布资产: \`daoshu-compass-v${VERSION_NAME}.apk\`（中文名 \`道枢罗盘-v${VERSION_NAME}.apk\` 见 Actions artifact）"
+            echo ""
+            echo "### 校验和"
+            echo ""
+            echo '```'
+            cat "${DIST_DIR}/SHA256SUMS.txt"
+            echo '```'
+            echo ""
+            echo "### 更新说明"
+            echo ""
+            echo "${changelog}"
+          } > RELEASE_NOTES.md
+
+          # 字段严格遵循 CONTRACT 第 6 节的 6 个字段，顺序固定
+          python3 - "$VERSION_NAME" "$VERSION_CODE" "$changelog" "$GITHUB_OWNER_CFG" "$GITHUB_REPO_CFG" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          version_name = sys.argv[1]
+          version_code = int(sys.argv[2])
+          changelog = sys.argv[3]
+          owner = sys.argv[4]
+          repo = sys.argv[5]
+
+          data = {
+              "versionCode": version_code,
+              "versionName": version_name,
+              "downloadUrl": (
+                  f"https://github.com/{owner}/{repo}/releases/download/"
+                  f"v{version_name}/daoshu-compass-v{version_name}.apk"
+              ),
+              "changelog": changelog,
+              "forceUpdate": False,
+              "minSupportedVersion": 1,
+          }
+
+          path = pathlib.Path("release/version.json")
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+          keys = set(json.loads(path.read_text(encoding="utf-8")).keys())
+          expected = {"versionCode", "versionName", "downloadUrl", "changelog", "forceUpdate", "minSupportedVersion"}
+          if keys != expected:
+              raise SystemExit(f"version.json 字段不匹配：{sorted(keys)}")
+          print("release/version.json 已更新：", data["versionName"], data["versionCode"])
+          PY
+          cat release/version.json
+
+      # ------------------------------------------------- version.json 提前回推 main
+      # 失败不得中断构建：continue-on-error + 内部全部以 warning 收尾
+      - name: 回推 release/version.json 到 main（失败不中断）
+        if: startsWith(github.ref, 'refs/tags/v')
+        continue-on-error: true
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+          TARGET_BRANCH: ${{ steps.version.outputs.github_branch }}
+        run: |
+          set -uo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 只暂存 version.json；CI 中对 build.gradle.kts 的临时改写绝不入库
+          git add release/version.json
+          if git diff --cached --quiet; then
+            echo "release/version.json 内容无变化，跳过提交"
+            exit 0
+          fi
+
+          git commit -m "chore(release): 发布 v${VERSION_NAME}，更新 release/version.json [skip ci]"
+
+          if ! git fetch origin "+refs/heads/${TARGET_BRANCH}:refs/remotes/origin/${TARGET_BRANCH}"; then
+            echo "::warning::git fetch 失败，跳过 version.json 回推（不影响 Release）"
+            exit 0
+          fi
+          if ! git rebase "origin/$TARGET_BRANCH"; then
+            echo "::warning::rebase 冲突，放弃本次 version.json 回推（不影响 Release）"
+            git rebase --abort || true
+            exit 0
+          fi
+          if ! git push origin "HEAD:$TARGET_BRANCH"; then
+            echo "::warning::version.json 推送失败（可能是分支保护），Release 仍会继续"
+            exit 0
+          fi
+          echo "release/version.json 已推送到 $TARGET_BRANCH"
+
+      # ---------------------------------------------------------------- Release
+      - name: 创建 GitHub Release（仅 v* 标签触发）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: 道枢罗盘 v${{ steps.version.outputs.version_name }}
+          body_path: RELEASE_NOTES.md
+          # 只附加 ASCII 名资产：更新通道第 3 级取 assets[0].browser_download_url，必须稳定命中
+          files: |
+            dist/daoshu-compass-v${{ steps.version.outputs.version_name }}.apk
+          draft: false
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------------------------------------------------------------- 摘要
+      - name: 构建摘要
+        if: always()
+        run: |
+          {
+            echo "### 道枢罗盘构建结果"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 触发方式 | ${{ github.event_name }} |"
+            echo "| Ref | \`${{ github.ref }}\` |"
+            echo "| versionName | \`${{ steps.version.outputs.version_name }}\` |"
+            echo "| versionCode | \`${{ steps.version.outputs.version_code }}\` |"
+            echo "| Release 资产 | \`daoshu-compass-v${{ steps.version.outputs.version_name }}.apk\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

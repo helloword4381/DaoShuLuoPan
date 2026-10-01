@@ -1,0 +1,8 @@
+{
+  "versionCode": 1000,
+  "versionName": "1.0.0",
+  "downloadUrl": "https://github.com/helloword4381/DaoShuLuoPan/releases/download/v1.0.0/daoshu-compass-v1.0.0.apk",
+  "changelog": "首个正式版：四层罗盘表盘（360°刻度/二十八宿/六十甲子/二十四山+八卦）、传感器融合与最短路径平滑、GeomagneticField 磁偏角、DataStore 设置持久化、三级降级自动更新与 APK 安装。",
+  "forceUpdate": false,
+  "minSupportedVersion": 1
+}

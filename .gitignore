@@ -1,0 +1,53 @@
+# =============================================================================
+# 《道枢罗盘》Git 忽略规则
+# 原则：签名材料、本地 SDK 配置、构建产物、IDE 配置一律不入库；
+#       仅 release/version.json 与 keystore/README.md 属于需要提交的发布链文件。
+# =============================================================================
+
+# ---------- 签名材料与密钥（最高优先级，绝不提交） ----------
+*.jks
+*.keystore
+release-key.jks
+key.properties
+keystore.properties
+# 兼容常见命名：任何私钥/证书容器
+*.p12
+*.pfx
+*.pem
+
+# ---------- 本地环境配置（含绝对路径，因机器而异） ----------
+local.properties
+sdk.properties
+
+# ---------- Gradle 构建目录与缓存 ----------
+.gradle/
+build/
+# Wrapper 文件（gradlew / gradlew.bat / gradle/wrapper/**）属于应提交内容，
+# 下面一行显式放行 Wrapper 发行包 jar，避免将来调整规则时误将其忽略。
+!gradle/wrapper/gradle-wrapper.jar
+
+# ---------- Android 构建产物 ----------
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+output-metadata.json
+# CI 本地复现时生成的交付目录
+dist/
+
+# ---------- IDE / 编辑器 ----------
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# ---------- 系统与日志 ----------
+.DS_Store
+Thumbs.db
+*.log
+*.hprof
