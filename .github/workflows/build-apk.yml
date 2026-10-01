@@ -187,7 +187,11 @@ jobs:
           echo "解析结果：versionName=$version_name versionCode=$version_code 仓库=$github_owner/$github_repo@$github_branch"
 
       # ---------------------------------------------------------------- 签名密钥
+      # 分支推送（push main / workflow_dispatch）允许在未配置 Secrets 时降级为 debug 签名，
+      # 这样「工程能否构建」不被密钥配置阻塞；打 tag 发布则强制要求正式签名。
+      # 该降级行为与 app/build.gradle.kts 的 hasReleaseSigning 回退逻辑一致。
       - name: 解码签名密钥到 RUNNER_TEMP（日志不打印任何密钥内容）
+        id: keystore
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
@@ -195,12 +199,23 @@ jobs:
           ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
         run: |
           set -euo pipefail
+
+          missing=""
           for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD ANDROID_STORE_PASSWORD; do
             if [ -z "${!name:-}" ]; then
-              echo "::error::缺少仓库 Secret：$name（Settings -> Secrets and variables -> Actions）"
-              exit 1
+              missing="${missing} $name"
             fi
           done
+
+          if [ -n "$missing" ]; then
+            if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+              echo "::error::发布标签构建必须配置签名 Secrets，缺失：${missing}（Settings -> Secrets and variables -> Actions）"
+              exit 1
+            fi
+            echo "::warning::未配置签名 Secrets（缺失：${missing}），本次改用 debug 签名构建。产物仅供验证，不可用于发布。"
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           keystore_path="$RUNNER_TEMP/release-key.jks"
           umask 077
@@ -215,26 +230,38 @@ jobs:
           file "$keystore_path"
           echo "keystore 字节数：$(wc -c < "$keystore_path" | tr -d ' ')"
           echo "KEYSTORE_PATH=$keystore_path" >> "$GITHUB_ENV"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
 
       # ---------------------------------------------------------------- 构建
-      - name: 构建签名 Release APK（assembleRelease）
+      - name: 构建 Release APK（assembleRelease）
         env:
-          KEYSTORE_PATH: ${{ runner.temp }}/release-key.jks
+          KEYSTORE_PATH: ${{ steps.keystore.outputs.signed == 'true' && format('{0}/release-key.jks', runner.temp) || '' }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
         run: |
           set -euo pipefail
+          if [ "${{ steps.keystore.outputs.signed }}" = "true" ]; then
+            echo "使用 Secrets 中的正式签名密钥构建"
+          else
+            echo "未配置签名 Secrets：按 app/build.gradle.kts 的回退规则使用 debug 签名"
+          fi
           ./gradlew assembleRelease --stacktrace
           echo "构建产物目录内容："
           ls -l "$APK_DIR"
 
       # ---------------------------------------------------------------- 校验签名
       - name: 校验 APK 签名（apksigner verify --verbose）
+        if: steps.keystore.outputs.signed == 'true'
         run: |
           set -euo pipefail
           bash scripts/verify-apk.sh "$APK_DIR/app-release.apk"
           rm -f "$KEYSTORE_PATH"
+
+      - name: 跳过签名校验（未配置 Secrets，debug 签名产物）
+        if: steps.keystore.outputs.signed != 'true'
+        run: |
+          echo "::warning::未配置签名 Secrets，跳过正式签名校验；该产物不可用于发布。"
 
       # ---------------------------------------------------------------- 交付物
       - name: 生成交付物（中文名 + ASCII 名）与 SHA256 校验和
@@ -369,7 +396,8 @@ jobs:
 
       # ---------------------------------------------------------------- Release
       - name: 创建 GitHub Release（仅 v* 标签触发）
-        if: startsWith(github.ref, 'refs/tags/v')
+        # 双保险：即便 tag 构建因异常走到这里，也绝不用 debug 签名产物创建 Release
+        if: startsWith(github.ref, 'refs/tags/v') && steps.keystore.outputs.signed == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -398,5 +426,6 @@ jobs:
             echo "| Ref | \`${{ github.ref }}\` |"
             echo "| versionName | \`${{ steps.version.outputs.version_name }}\` |"
             echo "| versionCode | \`${{ steps.version.outputs.version_code }}\` |"
+            echo "| 签名方式 | ${{ steps.keystore.outputs.signed == 'true' && 'Secrets 正式签名' || 'debug 签名（未配置 Secrets，不可发布）' }} |"
             echo "| Release 资产 | \`daoshu-compass-v${{ steps.version.outputs.version_name }}.apk\` |"
           } >> "$GITHUB_STEP_SUMMARY"
