@@ -319,6 +319,8 @@ apksigner verify --verbose app/build/outputs/apk/release/app-release.apk
 | 签名校验（区间对照） | `--min/max 23..23 / 24..27 / 28..29 / 30..35` | ✅ 分别命中 v1 / v2 / v3 / v3，四组 exit=0 |
 
 > 明细（含命令、字节数、测试用例名、签名块解析与两条已知告警）见 [docs/验证报告.md](docs/验证报告.md) 第五、六节。
+>
+> **未完成的验证**：Lint、真实 GitHub Actions 运行、R8 混淆包运行时行为、首次发布后的通道复测均未执行；**设备级冒烟（模拟器/真机）在本机受环境所限无法执行**（`HypervisorPresent=False`，无 AEHD/WHPX，Android Emulator 报 `x86_64 emulation currently requires hardware acceleration!`），需在有硬件加速的机器或 CI 模拟器上补做。
 
 ---
 
