@@ -244,8 +244,8 @@ fun CompassDial(
                     preferredFontSp = 14f,
                     orientation = RingTextOrientation.RADIAL,
                     bandWidthPx = dialRadiusPx * (MOUNTAIN_BAND_OUTER - MOUNTAIN_BAND_INNER),
-                    // 二十四山按卦位分色，覆盖上面的统一颜色
-                    colorOf = { index -> BAGUA_COLORS[MOUNTAIN_PALACE_INDEX[index]] }
+                    // 二十四山按卦位分色（用本主题校准过对比度的调色板），覆盖上面的统一颜色
+                    colorOf = { index -> dialColors.baguaColors[MOUNTAIN_PALACE_INDEX[index]] }
                 )
             }
         }
@@ -263,7 +263,7 @@ fun CompassDial(
                     orientation = RingTextOrientation.RADIAL,
                     bandWidthPx = dialRadiusPx * (BAGUA_BAND_OUTER - BAGUA_BAND_INNER),
                     angles = BAGUA_BEARINGS,
-                    colorOf = { index -> BAGUA_COLORS[index] }
+                    colorOf = { index -> dialColors.baguaColors[index] }
                 )
             }
         }
@@ -324,7 +324,7 @@ fun CompassDial(
             // ---------------- 第 4 层：二十四山（含八卦方位色） ----------------
             if (layers.mountains) {
                 drawBand(dialColors.bandColor, center, radius, MOUNTAIN_BAND_INNER, MOUNTAIN_BAND_OUTER)
-                drawPalaceSectors(center, radius, MOUNTAIN_BAND_INNER, MOUNTAIN_BAND_OUTER, 0.16f)
+                drawPalaceSectors(dialColors, center, radius, MOUNTAIN_BAND_INNER, MOUNTAIN_BAND_OUTER, 0.14f)
                 drawSpokes(dialColors.onDialColor, center, radius, MOUNTAIN_NAMES.size, MOUNTAIN_BAND_INNER, MOUNTAIN_BAND_OUTER)
                 drawRingLabels(mountainLabels, center, radius, RingTextOrientation.RADIAL)
             }
@@ -332,7 +332,7 @@ fun CompassDial(
             // ---------------- 第 5 层：八卦 ----------------
             if (layers.bagua) {
                 drawBand(dialColors.bandColor, center, radius, BAGUA_BAND_INNER, BAGUA_BAND_OUTER)
-                drawPalaceSectors(center, radius, BAGUA_BAND_INNER, BAGUA_BAND_OUTER, 0.30f)
+                drawPalaceSectors(dialColors, center, radius, BAGUA_BAND_INNER, BAGUA_BAND_OUTER, 0.26f)
                 drawRingLabels(baguaLabels, center, radius, RingTextOrientation.RADIAL)
             }
 
@@ -540,8 +540,9 @@ private fun DrawScope.drawSpokes(
     }
 }
 
-/** 八卦方位色扇区（每宫 45°，以卦位为中线） */
+/** 八卦方位色扇区（每宫 45°，以卦位为中线）；颜色取自当前主题校准过的调色板 */
 private fun DrawScope.drawPalaceSectors(
+    dialColors: DialColors,
     center: Offset,
     radius: Float,
     innerFraction: Float,
@@ -555,7 +556,7 @@ private fun DrawScope.drawPalaceSectors(
     for (index in BAGUA_BEARINGS.indices) {
         // drawArc 的 0° 位于三点钟方向，故减去 90°；再回退半格使卦位居中
         drawArc(
-            color = BAGUA_COLORS[index].copy(alpha = alpha),
+            color = dialColors.baguaColors[index].copy(alpha = alpha),
             startAngle = BAGUA_BEARINGS[index] - 90f - 22.5f,
             sweepAngle = 45f,
             useCenter = false,

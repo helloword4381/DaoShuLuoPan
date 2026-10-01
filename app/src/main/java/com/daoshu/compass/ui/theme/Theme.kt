@@ -103,7 +103,12 @@ data class DialColors(
     /** 环带上的文字颜色（与 [bandColor] 保证足够对比） */
     val bandTextColor: Color,
     /** 主刻度/外环/分格线等装饰线颜色（画在盘面底色上，需与 background 对比） */
-    val onDialColor: Color
+    val onDialColor: Color,
+    /**
+     * 八卦方位色（坎艮震巽离坤兑乾），已按本主题的 [bandColor] 校准对比度：
+     * 浅色主题用朝黑压暗版（≥4.6:1），深色主题用朝白提亮版（≥4.6:1）。
+     */
+    val baguaColors: List<Color>
 )
 
 /** 深色盘面（夜间观星）：深墨金环带 + 米金文字，对比充足 */
@@ -122,7 +127,17 @@ val DarkDialColors = DialColors(
     ),
     bandColor = Color(0xFF2A2416),
     bandTextColor = Color(0xFFF5E6C0),
-    onDialColor = CompassGold
+    onDialColor = CompassGold,
+    baguaColors = listOf(
+        Color(0xFF5D93B6), // 坎 · 玄蓝（北）
+        Color(0xFF9A8D5F), // 艮 · 土黄（东北）
+        Color(0xFF609A6A), // 震 · 青绿（东）
+        Color(0xFF3FA08A), // 巽 · 碧（东南）
+        Color(0xFFCC7664), // 离 · 朱（南）
+        Color(0xFFAB8840), // 坤 · 土金（西南）
+        Color(0xFF8E97A8), // 兑 · 素银（西）
+        Color(0xFF9A86C4)  // 乾 · 紫（西北）
+    )
 )
 
 /** 浅色盘面（白天户外）：暖金实色环带 + 近黑褐文字，户外强光下依然清晰 */
@@ -141,7 +156,17 @@ val LightDialColors = DialColors(
     ),
     bandColor = Color(0xFFD8C79C),
     bandTextColor = Color(0xFF3A2E12),
-    onDialColor = Color(0xFF8A6D2F)
+    onDialColor = Color(0xFF8A6D2F),
+    baguaColors = listOf(
+        Color(0xFF2A5672), // 坎 · 玄蓝（北）
+        Color(0xFF5C522E), // 艮 · 土黄（东北）
+        Color(0xFF325C3A), // 震 · 青绿（东）
+        Color(0xFF245B4F), // 巽 · 碧（东南）
+        Color(0xFF843D2E), // 离 · 朱（南）
+        Color(0xFF655024), // 坤 · 土金（西南）
+        Color(0xFF4E535C), // 兑 · 素银（西）
+        Color(0xFF584C70)  // 乾 · 紫（西北）
+    )
 )
 
 /** 当前盘面色板（@Composable 内使用） */
